@@ -5,6 +5,6 @@ uv.lock
 tests/__pycache__/
 pyproject.toml
 data/processed
-data/raw/Online_Retail.xlsx
+data/raw/Online Retail.xlsx
 data/processed/cleaned_data.csv
 src/clustering_library/__pycache__/
