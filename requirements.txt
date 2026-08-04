@@ -6,3 +6,4 @@ matplotlib>=3.9
 seaborn>=0.13
 plotly>=5.23
 scipy>=1.13
+openpyxl

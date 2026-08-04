@@ -57,11 +57,31 @@ class DataVisualizer:
         plt.show()
 
     def plot_time_patterns(self, df: pd.DataFrame) -> None:
-        plt.figure(figsize=(12,5))
-        day_hour_counts = df.groupby(["DayOfWeek","HourOfDay"]).size().unstack(fill_value=0)
+        temp_df = df.copy()
+
+        # 1. TỰ ĐỘNG TÁCH THỜI GIAN NẾU CHƯA CÓ CỘT
+        if "DayOfWeek" not in temp_df.columns:
+            # dt.dayofweek trả về từ 0 (Monday) -> 6 (Sunday)
+            temp_df["DayOfWeek"] = temp_df["InvoiceDate"].dt.dayofweek
+        
+        if "HourOfDay" not in temp_df.columns:
+            temp_df["HourOfDay"] = temp_df["InvoiceDate"].dt.hour
+
+        # 2. GOM NHÓM VÀ TẠO BẢNG MATRIX
+        day_hour_counts = (
+            temp_df.groupby(["DayOfWeek", "HourOfDay"])
+            .size()
+            .unstack(fill_value=0)
+        )
+
+        # 3. VẼ BIỂU ĐỒ HEATMAP
+        plt.figure(figsize=(12, 5))
+        sns.heatmap(day_hour_counts, cmap=self.cmap_seq)
+        
+        # 4. TÙY CHỈNH HIỂN THỊ
         plt.title("Purchase Activity by Day and Hour")
-        plt.xlabel("Hour Of Day")
-        plt.ylabel("Day Of Week")
+        plt.xlabel("Hour of Day")
+        plt.ylabel("Day of Week (0=Monday, 6=Sunday)")
         plt.tight_layout()
         plt.show()
 
