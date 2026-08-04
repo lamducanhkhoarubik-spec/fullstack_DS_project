@@ -1,0 +1,8 @@
+.venv/
+src/__pycache__
+uv.lock
+data/processed/cleaned_data.csv
+.pytest_cache/
+src/clustering_library/__pycache__
+tests/__pycache__
+pyproject.toml
