@@ -1,0 +1,36 @@
+name: Python Project CI/CD
+
+# Chạy tự động mỗi khi Push hoặc tạo Pull Request vào nhánh main
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. Kéo code từ GitHub về runner
+    - name: Check out repository code
+      uses: actions/checkout@v4
+
+    # 2. Setup môi trường Python
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: 'pip' # Cache lại thư viện để chạy nhanh hơn ở các lần sau
+
+    # 3. Cài đặt thư viện phụ thuộc
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install pytest pytest-cov
+
+    # 4. Chạy Pytest kiểm tra code
+    - name: Run Pytest
+      run: |
+        pytest
