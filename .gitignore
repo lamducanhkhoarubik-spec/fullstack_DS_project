@@ -1,8 +1,9 @@
 .venv/
 src/__pycache__
 uv.lock
-data
 .pytest_cache/
-C:\Users\ACER\Documents\data_project\src\clustering_library\__pycache__
-tests/__pycache__
+tests/__pycache__/
 pyproject.toml
+data/processed
+data/raw
+src/clustering_library/__pycache__/
