@@ -2,6 +2,7 @@
 src/__pycache__
 uv.lock
 data/processed/cleaned_data.csv
+data/raw/Online Retail.xlsx
 .pytest_cache/
 src/clustering_library/__pycache__
 tests/__pycache__
