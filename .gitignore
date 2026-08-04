@@ -1,8 +1,7 @@
 .venv/
 src/__pycache__
 uv.lock
-data/processed/cleaned_data.csv
-C:\Users\ACER\Documents\data_project\data\raw\Online Retail.xlsx
+data
 .pytest_cache/
 C:\Users\ACER\Documents\data_project\src\clustering_library\__pycache__
 tests/__pycache__
