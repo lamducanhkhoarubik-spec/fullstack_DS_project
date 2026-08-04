@@ -1,10 +1,8 @@
+# Môi trường ảo & Cache
 .venv/
-src/__pycache__
-uv.lock
 .pytest_cache/
-tests/__pycache__/
-pyproject.toml
-data/processed
-data/raw/Online Retail.xlsx
+**/__pycache__/
+uv.lock
+# Dữ liệu (Ẩn toàn bộ thư mục data)
 data/processed/cleaned_data.csv
-src/clustering_library/__pycache__/
+data/raw/Online Retail.csv
