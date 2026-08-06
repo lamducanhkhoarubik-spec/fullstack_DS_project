@@ -6,4 +6,4 @@ uv.lock
 # Dữ liệu (Ẩn toàn bộ thư mục data)
 data/processed/cleaned_data.csv
 data/raw/Online Retail.xlsx
-data/processd/cleaned_uk.csv
+data/processed/cleaned_uk.csv
