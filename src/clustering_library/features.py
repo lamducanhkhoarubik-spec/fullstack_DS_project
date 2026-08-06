@@ -9,7 +9,6 @@ import pandas as pd
 from sklearn.preprocessing import QuantileTransformer, StandardScaler
 
 logger = logging.getLogger(__name__)
-
 def _gini(series: pd.Series) -> float:
     arr = series.dropna().to_numpy()
     n = len(arr)
@@ -50,6 +49,7 @@ class FeatureEngineer:
     ]
 
     BULK_THRESHOLD: int = 12
+    NUM_METHODS: int = 4
 
     FEATURE_FAMILIES: Dict[str, List[str]] = {
         "Purchase Rhythm": [
@@ -123,7 +123,7 @@ class FeatureEngineer:
 
         temp_df['days_since_last'] = temp_df.groupby('CustomerID')["InvoiceDate"].diff().dt.days
         
-        rhythm_df = temp_df.groupby('customer_id').agg(
+        rhythm_df = temp_df.groupby('CustomerID').agg(
         total_orders=('InvoiceDate', 'count'),
         first_purchase=('InvoiceDate', 'min'),
         last_purchase=('InvoiceDate', 'max'),
@@ -152,7 +152,7 @@ class FeatureEngineer:
 
     # Tra về đúng các cột cần thiết
         return rhythm_df[[
-        'customer_id', 
+        'CustomerID', 
         'total_orders', 
         'recency', 
         'inter_cv', 
@@ -196,7 +196,7 @@ class FeatureEngineer:
     
       return result.reset_index()[[CUST_COL, 'AOV', 'SpendGini', 'PriceCV']]
 
-    def _compute_basket_behavior(df: pd.DataFrame) -> pd.DataFrame:
+    def _compute_basket_behavior(self,df: pd.DataFrame) -> pd.DataFrame:
     
     # TODO: SỬA TÊN CỘT Ở ĐÂY NẾU CẦN
     # -------------------------------------------------------------
@@ -251,7 +251,7 @@ class FeatureEngineer:
         inv_spend = (
             df.groupby(["CustomerID","InvoiceNo"])["TotalPrice"]
             .sum()
-            .reset_index("InvoiceTotalPrice")
+            .reset_index(name = "InvoiceTotalPrice")
 
         )
         inv_agg = inv_spend.groupby("CustomerID")["InvoiceTotalPrice"].agg(["max","mean"])
@@ -260,8 +260,75 @@ class FeatureEngineer:
         df_bulk = df.assign(is_bulk = (df["Quantity"] > self.BULK_THRESHOLD).astype('float32'))
         burst_line_rate = df_bulk.groupby("CustomerID")["is_bulk"].mean().rename("BulkLineRate")
 
-        quantity_metrics = df.groupby("CustomerID")['Quantity'].agg("std","mean")
-        quantity_cv = (quantity_cv['std'] / quantity_cv['mean']).rename("QuantityCV")
+        quantity_metrics = df.groupby("CustomerID")['Quantity'].agg(["std","mean"])
+        quantity_cv = (quantity_metrics['std'] / quantity_metrics['mean']).rename("QuantityCV")
 
         result = pd.concat([burst_idx, burst_line_rate,quantity_cv], axis = 1)
-        
+        return result
+    def create_customer_features(self) -> pd.DataFrame:
+        df = self.df
+
+        logger.info(f"[1/{self.NUM_METHODS}] Purchase Rhythm...")
+        rhythm = self._compute_purchase_rhythm(df)
+        logger.info(f"[2/{self.NUM_METHODS}] Spending Shape...")
+        spending = self._compute_spend_metrics(df)
+        logger.info(f"[3/{self.NUM_METHODS}] Basket Behavior...")
+        basket = self._compute_basket_behavior(df)
+        logger.info(f"[4/{self.NUM_METHODS}] Volume & Bulk...")
+        volume = self._compute_volume_bulk(df)
+
+    # Đảm bảo CustomerID luôn nằm ở Index trước khi join
+        def _ensure_index(d):
+           return d.set_index("CustomerID") if "CustomerID" in d.columns else d
+
+        rhythm = _ensure_index(rhythm)
+        spending = _ensure_index(spending)
+        basket = _ensure_index(basket)
+        volume = _ensure_index(volume)
+
+        base = (
+        rhythm.join(spending, how="outer")
+        .join(basket, how="outer")
+        .join(volume, how="outer")
+    )
+
+        all_candidates = base.copy()
+
+    # 1. Chỉ lấy cột khai báo trong CANDIDATES (Nếu rỗng/không khớp thì lấy hết các cột)
+        valid_cols = [c for c in self.CANDIDATES if c in all_candidates.columns]
+        if not valid_cols:
+          logger.warning(
+            "Không cột nào trong CANDIDATES khớp! Tự động lấy tất cả các cột hiện có."
+        )
+        valid_cols = list(all_candidates.columns)
+
+        all_candidates = all_candidates[valid_cols]
+
+    # 2. Xử lý các giá trị NaN phát sinh
+        n_missing = all_candidates.isnull().sum().sum()
+        if n_missing > 0:
+          logger.warning(
+            "%d NaN values — filling with column medians.", n_missing
+        )
+        all_candidates = all_candidates.fillna(all_candidates.median())
+
+        logger.info(
+        "Computed %d candidates for %d customers",
+        len(valid_cols),
+        len(all_candidates),
+    )
+        self.customer_feature_candidates = all_candidates.copy()
+
+    # 3. Vì chưa dùng _filter_by_correlation, giữ lại toàn bộ cột hợp lệ
+        self.feature_customer = valid_cols
+        self.customer_features = all_candidates[
+        self.feature_customer
+    ].reset_index()
+
+        logger.info(
+        "Final feature set (%d features):", len(self.feature_customer)
+    )
+        for f in self.feature_customer:
+           logger.info("    %s", f)
+
+        return self.customer_features
