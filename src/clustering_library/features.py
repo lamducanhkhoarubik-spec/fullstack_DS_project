@@ -17,6 +17,7 @@ def _gini(series: pd.Series) -> float:
     arr = np.sort(arr)
     index = np.arange(1, n + 1)
     return (2 * np.sum(index * arr) / (n * np.sum(arr))) - (n + 1) / n
+
 class FeatureEngineer:
     CANDIDATES: List[str] = [
         # Family 1 — Purchase Rhythm
@@ -49,7 +50,7 @@ class FeatureEngineer:
     ]
 
     BULK_THRESHOLD: int = 12
-    NUM_METHODS: int = 4
+    NUM_METHODS: int = 8
 
     FEATURE_FAMILIES: Dict[str, List[str]] = {
         "Purchase Rhythm": [
@@ -265,6 +266,116 @@ class FeatureEngineer:
 
         result = pd.concat([burst_idx, burst_line_rate,quantity_cv], axis = 1)
         return result
+
+    def _compute_concentration(self, df: pd.DataFrame) -> pd.DataFrame:
+           sku_spend = df.groupby(["CustomerID", "StockCode"])["TotalPrice"].sum()
+           cust_total = sku_spend.groupby(level = "CustomerID").transform("sum")
+           sku_share = sku_spend / cust_total
+           sku_hii = (sku_share ** 2).groupby(level = "CustomerID").sum().rename("SKU_HHI")
+    
+           inv_spend = (
+              df.groupby(["CustomerID","InvoiceNo"])["TotalPrice"]
+              .sum()
+              .reset_index(name = 'inv_total')
+           )
+           inv_spend['cust_total'] = inv_spend.groupby("CustomerID")["inv_total"].transform("sum")
+           max_spend_share = (
+              (inv_spend["inv_total"] / inv_spend['cust_total'])
+              .groupby(inv_spend["CustomerID"])
+              .max()
+              .rename("MaxSpendShare")
+           )
+           return pd.concat([sku_hii, max_spend_share], axis = 1)
+    
+    def _compute_lifecycle(self, df: pd.DataFrame,customer_ids: pd.Index) -> pd.DataFrame:
+           
+            if self.raw_df is not None:
+                raw_uk = self.raw_df[
+                    (self.raw_df["Country"] == "United Kingdom")
+                    & (self.raw_df["CustomerID"].notna())
+                ].copy()
+                raw_uk["CustomerID"] = raw_uk["CustomerID"].astype(float).astype(int)
+                raw_uk["InvoiceNo"] = raw_uk["InvoiceNo"].astype(str)
+                raw_uk["is_cancelled"] = raw_uk["InvoiceNo"].str.startswith("C")
+                raw_uk["AbsValue"] = (raw_uk["Quantity"] * raw_uk["UnitPrice"]).abs()
+    
+                inv_flags = (
+                    raw_uk.groupby(["CustomerID", "InvoiceNo"])["is_cancelled"]
+                    .first()
+                    .reset_index()
+                )
+                agg_count = inv_flags.groupby("CustomerID")["is_cancelled"].agg(
+                    n_cancelled="sum", n_total="count"
+                )
+                return_rate = (agg_count["n_cancelled"] / agg_count["n_total"]).rename("ReturnRate")
+                return_rate = return_rate.reindex(customer_ids).fillna(0.0)
+    
+                cust_cancel_val = (
+                    raw_uk[raw_uk["is_cancelled"]]
+                    .groupby("CustomerID")["AbsValue"]
+                    .sum()
+                )
+                cust_total_val = raw_uk.groupby("CustomerID")["AbsValue"].sum()
+                return_value_rate = (cust_cancel_val / cust_total_val).rename("ReturnValueRate")
+                return_value_rate = return_value_rate.reindex(customer_ids).fillna(0.0)
+            else:
+                logger.warning("raw_data_path not set — ReturnRate and ReturnValueRate = 0.")
+                return_rate = pd.Series(0.0, index=customer_ids, name="ReturnRate")
+                return_value_rate = pd.Series(0.0, index=customer_ids, name="ReturnValueRate")
+    
+            return pd.concat([return_rate, return_value_rate], axis=1)
+    def _compute_spend_acceleration(
+        self, df: pd.DataFrame, customer_ids: pd.Index
+    ) -> pd.Series:
+        """Spending trajectory: (last-3-month avg) / (first-3-month avg) - 1, clipped to [-3, 3].
+
+        Customers with fewer than 3 distinct months of history get 0.0.
+        """
+        monthly = (
+            df.assign(YearMonth=df["InvoiceDate"].dt.to_period("M"))
+            .groupby(["CustomerID", "YearMonth"])["TotalPrice"]
+            .sum()
+            .reset_index(name="MonthlySpend")
+        )
+
+        def _accel(group: pd.DataFrame) -> float:
+            spend = group.sort_values("YearMonth")["MonthlySpend"].values
+            if len(spend) < 3:
+                return 0.0
+            first_avg = spend[:3].mean()
+            last_avg = spend[-3:].mean()
+            raw = (last_avg - first_avg) / (abs(first_avg) + 1e-9)
+            return float(np.clip(raw, -3.0, 3.0))
+
+        accel = (
+            monthly.groupby("CustomerID")
+            .apply(_accel, include_groups=False)
+            .rename("SpendAcceleration")
+        )
+        return accel.reindex(customer_ids).fillna(0.0)
+
+    def _compute_quarter_concentration(
+        self, df: pd.DataFrame, customer_ids: pd.Index
+    ) -> pd.Series:
+        """Max quarter spend fraction — captures seasonal concentration.
+
+        Values in [0.25, 1.0]: 0.25 = uniform across quarters, 1.0 = all spend
+        in one quarter. Customers absent from df get 0.25 (no concentration).
+        """
+        q_df = df.copy()
+        q_df["Quarter"] = q_df["InvoiceDate"].dt.quarter
+
+        cust_total = q_df.groupby("CustomerID")["TotalPrice"].sum()
+        cust_qmax = (
+            q_df.groupby(["CustomerID", "Quarter"])["TotalPrice"]
+            .sum()
+            .groupby("CustomerID")
+            .max()
+        )
+
+        conc = (cust_qmax / cust_total.clip(lower=1e-9)).rename("QuarterConcentration")
+        conc = conc.clip(0.25, 1.0)
+        return conc.reindex(customer_ids).fillna(0.25)
     def create_customer_features(self) -> pd.DataFrame:
         df = self.df
 
@@ -276,6 +387,7 @@ class FeatureEngineer:
         basket = self._compute_basket_behavior(df)
         logger.info(f"[4/{self.NUM_METHODS}] Volume & Bulk...")
         volume = self._compute_volume_bulk(df)
+        
 
     # Đảm bảo CustomerID luôn nằm ở Index trước khi join
         def _ensure_index(d):
@@ -287,11 +399,18 @@ class FeatureEngineer:
         volume = _ensure_index(volume)
 
         base = (
-        rhythm.join(spending, how="outer")
+         rhythm.join(spending, how="outer")
         .join(basket, how="outer")
         .join(volume, how="outer")
     )
-
+        logger.info(f"[5/{self.NUM_METHODS}] Product Concentration...")
+        concentration = self._compute_concentration(df)
+        logger.info(f"[6/{self.NUM_METHODS}] Customer Lifecycle (ReturnRate + ReturnValueRate)...")
+        lifecycle = self._compute_lifecycle(df, base.index)
+        logger.info(f"[7/{self.NUM_METHODS}] Acceleration Concentration...")
+        acceleration = self._compute_spend_acceleration(df, base.index)
+        logger.info(f"[8/{self.NUM_METHODS}] Quarter Concentration...")
+        quarter = self._compute_quarter_concentration(df, base.index)
         all_candidates = base.copy()
 
     # 1. Chỉ lấy cột khai báo trong CANDIDATES (Nếu rỗng/không khớp thì lấy hết các cột)
@@ -319,8 +438,20 @@ class FeatureEngineer:
     )
         self.customer_feature_candidates = all_candidates.copy()
 
+        provisional_qt = QuantileTransformer(
+           output_distribution="normal",
+           n_quantiles=min(500, len(all_candidates)),
+           random_state=42,
+        )
+        provisional = provisional_qt.fit_transform(all_candidates)
+        provisional = StandardScaler().fit_transform(provisional)
+        provisional_df = pd.DataFrame(
+           np.clip(provisional, -3.0, 3.0),
+           columns = all_candidates.columns,
+           index = all_candidates.index,
+        )
     # 3. Vì chưa dùng _filter_by_correlation, giữ lại toàn bộ cột hợp lệ
-        self.feature_customer = valid_cols
+        self.feature_customer = self._filter_by_correlaton(provisional_df)
         self.customer_features = all_candidates[
         self.feature_customer
     ].reset_index()
@@ -332,3 +463,128 @@ class FeatureEngineer:
            logger.info("    %s", f)
 
         return self.customer_features
+    
+    
+
+    def _filter_by_correlaton(self, df: pd.DataFrame) -> List[str]:
+       corr_matrix = df.corr(method = "pearson").abs()
+       upper_tri = corr_matrix.where(
+          np.triu(np.ones(corr_matrix.shape), k = 1).astype(bool)
+       )
+       to_drop = [c for c in upper_tri.columns if any(upper_tri[c] > self.corr_threshold)]
+       selected_features = [c for c in df.columns if c not in to_drop]
+
+       dropped_count = len(to_drop)
+       if (dropped_count) > 0:
+          logger.info(
+             "Dropped %d features due to the high correlation (> %.2f): %s",
+             dropped_count,
+             self.corr_threshold,
+             to_drop,
+          )
+       return selected_features
+
+    def transform_features(self) -> pd.DataFrame:
+        indexed = self.customer_features.set_index("CustomerID")
+
+        self.qt = QuantileTransformer(
+            output_distribution="normal",
+            n_quantiles=500,
+            random_state=42
+
+        )
+        transformed = self.qt.fit_transform(indexed.values)
+        self.customer_features_transformed = pd.DataFrame(
+            transformed,
+            columns = self.feature_customer,
+            index=indexed.index
+        )
+        logger.info("QuantileTransformer applied")
+        return self.customer_features_transformed
+
+    def _build_family_weights(self) -> Dict[str, float]:
+        feature_to_family = {}
+        for family, features in self.FEATURE_FAMILIES.items():
+           for feature in features:
+              feature_to_family[feature] = family
+
+    # 2. Đếm số lượng feature trong từng nhóm (Bọc lót .get() để gán 'Other' nếu thiếu)
+        feature_families = [
+            feature_to_family.get(f, "Other") for f in self.feature_customer
+    ]
+        counts = pd.Series(feature_families).value_counts()
+
+    # 3. Tính trọng số 1 / sqrt(k) cho từng feature
+        weights = {}
+        for feature in self.feature_customer:
+            family = feature_to_family.get(feature, "Other")
+        # k là số lượng cột thuộc nhóm đó
+            k = counts[family]
+            weights[feature] = float(1.0 / np.sqrt(k))
+
+        return weights
+
+    def scale_features(self) -> pd.DataFrame:
+        self.scaler = StandardScaler()
+        scaled = self.scaler.fit_transform(self.customer_features_transformed)
+
+        scaled_df = pd.DataFrame(
+            scaled,
+            columns = self.feature_customer,
+            index = self.customer_features_transformed.index
+
+        )
+        clipped = scaled_df.clip(lower=-3.0, upper = 3.0)
+        self.customer_features_scaled_unweighted = clipped
+        self.family_weights = self._build_family_weights()
+        weighted= clipped.mul(pd.Series(self.family_weights), axis = 1)
+        self.customer_features_scaled = weighted
+        logger.info("Feature scaling complete")
+        return weighted
+    def save_pipeline(self, output_dir: str = "../models") -> None:
+        if self.scaler is None:
+            raise RuntimeError("Scaler not fitted. Run scale_features() first.")
+        if self.qt is None:
+            raise RuntimeError("QuantileTransformer not fitted. Run transform_features() first.")
+
+        os.makedirs(output_dir, exist_ok=True)
+        joblib.dump(self.scaler, f"{output_dir}/scaler.pkl")
+        joblib.dump(self.qt,     f"{output_dir}/quantile_transformer.pkl")
+
+        metadata: Dict = {
+            "bulk_qty_threshold": self.BULK_QTY_THRESHOLD,
+            "feature_order":      self.feature_customer,
+            "n_candidates":       len(self.CANDIDATES),
+            "corr_threshold":     self.corr_threshold,
+            "correlation_space": "quantile_transformed_scaled_clipped",
+            "post_scale_clip":    3.0,
+            "family_weights":     self.family_weights,
+            "feature_families":   self.FEATURE_FAMILIES,
+        }
+        with open(f"{output_dir}/pipeline_metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        logger.info("Pipeline artifacts saved to: %s/", output_dir)
+
+    def save_features(self, output_dir: str = "../data/processed") -> None:
+        os.makedirs(output_dir, exist_ok=True)
+
+        self.customer_feature_candidates.to_csv(
+            f"{output_dir}/customer_feature_candidates.csv"
+        )
+        self.customer_features.set_index("CustomerID").to_csv(
+            f"{output_dir}/customer_features.csv"
+        )
+        self.customer_features_transformed.to_csv(
+            f"{output_dir}/customer_features_transformed.csv"
+        )
+        self.customer_features_scaled_unweighted.to_csv(
+            f"{output_dir}/customer_features_scaled_unweighted.csv"
+        )
+        self.customer_features_scaled.to_csv(
+            f"{output_dir}/customer_features_scaled.csv"
+        )
+        logger.info("All features saved to: %s", output_dir)
+
+        models_dir = os.path.join(os.path.dirname(output_dir), "models")
+        self.save_pipeline(models_dir)
